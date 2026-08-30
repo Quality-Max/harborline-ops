@@ -1,0 +1,16 @@
+{
+  "name": "harborline-ops",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A compact operations portal for shipment and inventory workflows.",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
