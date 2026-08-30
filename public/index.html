@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Harborline shipment and inventory operations portal">
+    <title>Harborline Operations</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+    <main id="login-screen" class="login-shell">
+      <section class="login-panel" aria-labelledby="login-title">
+        <a class="brand brand-dark" href="/" aria-label="Harborline home">
+          <span class="brand-mark">H</span>
+          <span>Harborline</span>
+        </a>
+        <div class="login-copy">
+          <p class="eyebrow">Operations workspace</p>
+          <h1 id="login-title">Keep every shipment moving.</h1>
+          <p>Coordinate inventory, dispatches, and reporting from one calm workspace.</p>
+        </div>
+        <form id="login-form" class="stack" data-testid="login-form">
+          <label>
+            Username
+            <input name="username" autocomplete="username" required data-testid="username">
+          </label>
+          <label>
+            Password
+            <input name="password" type="password" autocomplete="current-password" required data-testid="password">
+          </label>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button class="button button-primary button-full" type="submit">Sign in</button>
+        </form>
+      </section>
+      <section class="login-art" aria-hidden="true">
+        <div class="route-map">
+          <span class="route-dot dot-a"></span>
+          <span class="route-dot dot-b"></span>
+          <span class="route-dot dot-c"></span>
+          <svg viewBox="0 0 600 460" role="presentation">
+            <path d="M68 358 C150 180, 230 380, 330 220 S495 108, 550 76" />
+          </svg>
+          <div class="art-card card-a"><b>47</b><span>units ready</span></div>
+          <div class="art-card card-b"><b>8</b><span>routes active</span></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <aside class="sidebar">
+        <a class="brand" href="#dashboard">
+          <span class="brand-mark">H</span>
+          <span>Harborline</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="#dashboard" data-view="dashboard"><span>Overview</span></a>
+          <a href="#shipments" data-view="shipments"><span>Shipments</span></a>
+          <a href="#inventory" data-view="inventory"><span>Inventory</span></a>
+          <a href="#reports" data-view="reports"><span>Reports</span></a>
+          <a href="#team" data-view="team"><span>Team</span></a>
+          <a href="#settings" data-view="settings"><span>Settings</span></a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="avatar" id="sidebar-avatar">MC</div>
+          <div class="account-copy">
+            <strong id="sidebar-name">—</strong>
+            <span id="sidebar-role">—</span>
+          </div>
+          <button id="logout-button" class="icon-button" aria-label="Sign out" title="Sign out">↗</button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p id="org-name" class="org-name">—</p>
+            <h1 id="page-title">Overview</h1>
+          </div>
+          <div id="topbar-actions"></div>
+        </header>
+        <section id="page-content" class="page-content" tabindex="-1"></section>
+      </main>
+    </div>
+
+    <dialog id="modal">
+      <div class="modal-frame">
+        <header>
+          <div>
+            <p id="modal-eyebrow" class="eyebrow"></p>
+            <h2 id="modal-title"></h2>
+          </div>
+          <button class="icon-button" type="button" data-dialog-close aria-label="Close dialog">×</button>
+        </header>
+        <div id="modal-content"></div>
+      </div>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
