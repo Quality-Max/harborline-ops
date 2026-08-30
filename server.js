@@ -1,12 +1,19 @@
 'use strict';
 
+const { AsyncLocalStorage } = require('node:async_hooks');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const SESSION_COOKIE = 'harborline_session';
+const SESSION_AAD = Buffer.from('harborline-session-v1');
+const SESSION_MAX_AGE_SECONDS = 43_200;
+const SESSION_COOKIE_LIMIT = 3_800;
+const requestState = new AsyncLocalStorage();
 
 function initialState() {
   return {
@@ -50,22 +57,129 @@ function initialState() {
     ],
     adjustments: [],
     audit: [],
-    sessions: new Map(),
     sequence: 1100,
     summaryCache: new Map(),
   };
 }
 
-let state = initialState();
+let fallbackState = initialState();
+
+function activeState() {
+  return requestState.getStore()?.state || fallbackState;
+}
+
+const state = new Proxy({}, {
+  get(_target, property) {
+    return activeState()[property];
+  },
+  set(_target, property, value) {
+    activeState()[property] = value;
+    return true;
+  },
+});
+
+function serializableState(appState) {
+  return {
+    ...appState,
+    summaryCache: [...appState.summaryCache.entries()],
+  };
+}
+
+function restoredState(value) {
+  if (!value || typeof value !== 'object') throw new Error('Session state is invalid');
+  return {
+    ...initialState(),
+    ...value,
+    summaryCache: new Map(Array.isArray(value.summaryCache) ? value.summaryCache : []),
+  };
+}
+
+function sessionKey() {
+  const secret = process.env.HARBORLINE_SESSION_SECRET;
+  return secret ? crypto.createHash('sha256').update(secret).digest() : null;
+}
+
+function sealSession(session, appState) {
+  const key = sessionKey();
+  if (!key) throw new Error('Session security is not configured');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(SESSION_AAD);
+  const payload = zlib.deflateRawSync(Buffer.from(JSON.stringify({
+    version: 1,
+    session,
+    state: serializableState(appState),
+  })));
+  const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+}
+
+function openSession(req) {
+  const key = sessionKey();
+  const token = cookies(req)[SESSION_COOKIE];
+  if (!key || !token) return null;
+  try {
+    const packed = Buffer.from(token, 'base64url');
+    if (packed.length < 29) return null;
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, packed.subarray(0, 12));
+    decipher.setAAD(SESSION_AAD);
+    decipher.setAuthTag(packed.subarray(12, 28));
+    const plaintext = Buffer.concat([decipher.update(packed.subarray(28)), decipher.final()]);
+    const payload = JSON.parse(zlib.inflateRawSync(plaintext).toString('utf8'));
+    const createdAt = Number(payload.session?.createdAt);
+    const sessionAge = Date.now() - createdAt;
+    if (
+      payload.version !== 1
+      || !payload.session?.userId
+      || !payload.session?.orgId
+      || !payload.session?.role
+      || !Number.isFinite(createdAt)
+      || sessionAge < -300_000
+      || sessionAge > SESSION_MAX_AGE_SECONDS * 1_000
+    ) return null;
+    return { session: payload.session, state: restoredState(payload.state) };
+  } catch {
+    return null;
+  }
+}
+
+function secureCookie(req) {
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  return Boolean(req.socket.encrypted) || forwarded === 'https';
+}
+
+function sessionCookie(req, value, options = {}) {
+  const attributes = [
+    `${SESSION_COOKIE}=${value}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    'Priority=High',
+  ];
+  if (secureCookie(req)) attributes.push('Secure');
+  if (options.clear) attributes.push('Max-Age=0');
+  else attributes.push(`Max-Age=${SESSION_MAX_AGE_SECONDS}`);
+  return attributes.join('; ');
+}
 
 function sendJson(res, status, payload, headers = {}) {
+  const context = res.harborlineSessionContext;
+  const responseHeaders = { ...headers };
+  if (context?.persist) {
+    const cookie = sessionCookie(context.req, sealSession(context.session, context.state));
+    if (Buffer.byteLength(cookie) > SESSION_COOKIE_LIMIT) {
+      context.persist = false;
+      return sendJson(res, 507, { error: 'This session has reached its storage limit' });
+    }
+    responseHeaders['Set-Cookie'] = cookie;
+  }
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'same-origin',
-    ...headers,
+    ...responseHeaders,
   });
   res.end(JSON.stringify(payload));
 }
@@ -102,8 +216,7 @@ function cookies(req) {
 }
 
 function currentSession(req) {
-  const token = cookies(req).harborline_session;
-  return token ? state.sessions.get(token) || null : null;
+  return req.harborlineSession || null;
 }
 
 function requireSession(req, res) {
@@ -138,6 +251,11 @@ function accessCodeMatches(candidate, expected) {
   const candidateHash = crypto.createHash('sha256').update(String(candidate)).digest();
   const expectedHash = crypto.createHash('sha256').update(String(expected)).digest();
   return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
+
+function bearerToken(req) {
+  const authorization = String(req.headers.authorization || '');
+  return authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
 }
 
 function organization(orgId) {
@@ -212,17 +330,23 @@ async function routeApi(req, res, url) {
     if (user && !configuredAccessCode(user.orgId)) return sendError(res, 503, 'Workspace access is not configured');
     if (user && !accessCodeMatches(body.password, configuredAccessCode(user.orgId))) return sendError(res, 401, 'The username or password is incorrect');
     if (!user) return sendError(res, 401, 'The username or password is incorrect');
-    const token = crypto.randomBytes(24).toString('hex');
-    state.sessions.set(token, { userId: user.id, orgId: user.orgId, role: user.role, createdAt: Date.now() });
+    if (!sessionKey()) return sendError(res, 503, 'Session security is not configured');
+    const session = { userId: user.id, orgId: user.orgId, role: user.role, createdAt: Date.now() };
+    const token = sealSession(session, activeState());
     return sendJson(res, 200, { user: publicUser(user), organization: organization(user.orgId) }, {
-      'Set-Cookie': `harborline_session=${token}; Path=/; HttpOnly; SameSite=Lax`,
+      'Set-Cookie': sessionCookie(req, token),
     });
   }
 
   if (req.method === 'DELETE' && url.pathname === '/api/session') {
-    const token = cookies(req).harborline_session;
-    if (token) state.sessions.delete(token);
-    return sendJson(res, 200, { ok: true }, { 'Set-Cookie': 'harborline_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0' });
+    return sendJson(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', { clear: true }) });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/internal/reset') {
+    const resetToken = process.env.HARBORLINE_RESET_TOKEN;
+    if (!resetToken) return sendError(res, 404, 'API route not found');
+    if (!accessCodeMatches(bearerToken(req), resetToken)) return sendError(res, 403, 'Reset authorization failed');
+    return sendJson(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', { clear: true }) });
   }
 
   const session = requireSession(req, res);
@@ -390,9 +514,23 @@ function createServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     try {
-      if (url.pathname.startsWith('/api/')) await routeApi(req, res, url);
-      else serveStatic(req, res, url.pathname);
+      if (!url.pathname.startsWith('/api/')) {
+        serveStatic(req, res, url.pathname);
+        return;
+      }
+
+      const startsFresh = req.method === 'POST' && url.pathname === '/api/session';
+      const opened = startsFresh ? null : openSession(req);
+      const appState = opened?.state || initialState();
+      req.harborlineSession = opened?.session || null;
+      const persists = Boolean(opened) && ['POST', 'PUT', 'PATCH'].includes(req.method)
+        && url.pathname !== '/api/internal/reset';
+      res.harborlineSessionContext = opened
+        ? { req, session: opened.session, state: appState, persist: persists }
+        : null;
+      await requestState.run({ state: appState }, () => routeApi(req, res, url));
     } catch (error) {
+      if (res.harborlineSessionContext) res.harborlineSessionContext.persist = false;
       sendError(res, 400, error.message || 'The request could not be completed');
     }
   });
@@ -407,6 +545,6 @@ if (require.main === module) {
 module.exports = {
   createServer,
   resetState() {
-    state = initialState();
+    fallbackState = initialState();
   },
 };
