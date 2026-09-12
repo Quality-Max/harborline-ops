@@ -44,3 +44,9 @@ harness.
 ## License
 
 MIT
+
+## Repository scope
+
+Harborline is a separate operations application. It is not the QualityMax platform source or an installation path for QualityMax.
+
+For the QA platform and its maintained testing tools, see the [QualityMax directory](https://github.com/Quality-Max/qualitymax).
